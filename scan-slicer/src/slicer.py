@@ -1,3 +1,5 @@
+#TODO autosave project
+#TODO workable reordering, / alt: numbering range spec
 #TODO front/back
 #TODO stitching
 #TODO rotate
@@ -11,14 +13,15 @@ from typing import *
 from pathlib import Path
 
 from PyQt6.QtCore import pyqtSignal, QModelIndex, Qt, QSize, QRect, QItemSelectionModel, qDebug, QObject, QEvent, \
-  QPoint, QRectF, QPointF, QSizeF
+  QPoint, QRectF, QPointF, QSizeF, QCollator
 from PyQt6.QtGui import QIcon, QPixmap, QImage, QMouseEvent, QPainter, QBrush, QColor, QKeyEvent, QPen, QWheelEvent, \
-  QResizeEvent, QTransform, QDragLeaveEvent, QDropEvent
+  QResizeEvent, QTransform, QDragLeaveEvent, QDropEvent, QStandardItemModel
 from PyQt6.QtWidgets import QWidget, QListWidget, QListWidgetItem, QApplication, QVBoxLayout, QSizePolicy, \
   QGraphicsView, QPushButton, QFileDialog, QHBoxLayout, QToolBar, QGraphicsScene, QGraphicsPixmapItem, \
   QStyledItemDelegate, QStyle, QAbstractItemView, QGraphicsSceneMouseEvent, QGraphicsItem, QGraphicsRectItem, \
   QWidgetItem, QTextEdit, QLineEdit, QLabel
 import code
+import re
 
 class QGlobalWidget(QWidget):
   def keyPressEvent(self, a0: QKeyEvent) -> None:
@@ -27,10 +30,27 @@ class QGlobalWidget(QWidget):
     else:
       super().keyPressEvent(a0)
 
+def mkCollator():
+  qc = QCollator()
+  qc.setNumericMode(True)
+  return qc
+
 class GUICatalog(QGlobalWidget):
+  class QListWidgetItemSorting(QListWidgetItem):
+    qc = mkCollator()
+
+    #def __lt__(self, other):
+    #  res = self.qc.compare(self.text(), other.text())
+    #  return res
+
   class ThumbListWidget(QListWidget):
     pathChanged = pyqtSignal([str])
+    filterChanged = pyqtSignal([str])
     mySelectionChanged = pyqtSignal([str])
+
+    # overriding __lt__ on the item for some reason eventually causes a segfault in the sort
+    #def sortItems(self, order: Qt.SortOrder = ...) -> None:
+    #  self.model().
 
     def __init__(self, *args, **kwargs):
       super().__init__(*args, **kwargs)
@@ -40,21 +60,42 @@ class GUICatalog(QGlobalWidget):
       #self.setViewMode(QListWidget.ViewMode.IconMode)
       self._path = None
       self.pathChanged.connect(self.updateImagesUsing)
+      def filterChanger(f):
+        self.filter = f
+        if self._path:
+          self.updateImagesUsing(self._path)
+      self.filterChanged.connect(filterChanger)
       self.currentItemChanged.connect(self.dispatchSelected)
       self.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+      #self.model().sor
+      #self.setSortingEnabled(True) #TODO does this even do anything?
+      #self.sortItems(Qt.SortOrder.AscendingOrder)
+      self.filter = None
 
     #TODO
     def dispatchSelected(self, current: QListWidgetItem, previous):
-      userdata = current.data(Qt.ItemDataRole.UserRole)
-      self.mySelectionChanged.emit(userdata)
+      if current:
+        userdata = current.data(Qt.ItemDataRole.UserRole)
+        self.mySelectionChanged.emit(userdata)
+
+    def normalizeName(self, s):
+      return re.sub("[0-9]+", lambda x: f"{int(x.group()):05}", s)
 
     def updateImagesUsing(self, path: str):
       self.clear() #TODO caching
-      for p in Path(path).iterdir():
-        if any([str(p).lower().endswith(x) for x in ["jpg", "png"]]):
-          i = QListWidgetItem(QIcon(str(p)), str(p.name))
+      try:
+        filt = re.compile(self.filter)
+      except re.error:
+        return # No change
+      for p in sorted(Path(path).iterdir(), key=lambda x: self.normalizeName(str(x))):
+        #if any([str(p).lower().endswith(x) for x in ["jpg", "png"]]):
+        if re.match(filt, p.name):
+          i = GUICatalog.QListWidgetItemSorting(QIcon(str(p)), str(p.name))
           i.setData(Qt.ItemDataRole.UserRole, str(p))
+          #i.
+          #i.model(.setData(QStandardItemModel().sortRole(), self.normalizeName(str(p))) #TODO hack to get sorting to work because of the __lt__ segfault issue
           self.addItem(i)  # TODO correct parent?
+      #self.sortItems()
       #  i = QListWidgetItem(QIcon(str(p)), str(p.name))
       #  i.setData(Qt.ItemDataRole.UserRole, str(p))
       #  self.addItem(i)  # TODO correct parent?
@@ -77,7 +118,13 @@ class GUICatalog(QGlobalWidget):
 
     l = QVBoxLayout()
     self.setLayout(l)
+    self.filtField = QLineEdit("paper\.[0-9]+\.jpg")
+    l.addWidget(self.filtField)
     self.thumbs = GUICatalog.ThumbListWidget(parent=self)
+    def updateFilter():
+      self.thumbs.filterChanged.emit(self.filtField.text())
+    self.filtField.textChanged.connect(updateFilter)
+    updateFilter()
     l.addWidget(self.thumbs)
 
     #b = QPushButton("Open", parent=self)
@@ -121,6 +168,8 @@ class SlicerRoot:
       self.setDropIndicatorShown(True)
       self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
 
+      self.offset = 0
+
     def dropEvent(self, event: QDropEvent) -> None:
       qDebug("dropev")
       self.model().layoutChanged.emit() #TODO idk why this doesnt work by itself
@@ -146,10 +195,10 @@ class SlicerRoot:
       size = newRect.size().toSize()
       self._setSize(rectItem, size, i, v)
 
-    def updateSliceIdx(self, i: QListWidgetItem, oldrow):
+    def updateSliceIdx(self, oldrow):
       for row in range(oldrow, self.model().rowCount()):
         le: QLineEdit = self.item(row).data(Qt.ItemDataRole.UserRole+2)
-        le.setText("{:03}_{}".format(row, le.text().split("_")[1]))
+        le.setText("{:03}_{}".format(row + self.offset, le.text().split("_")[1]))
 
     def sliceAdded(self, rectItem: QGraphicsRectItem):
       qDebug("sliceadd")
@@ -196,7 +245,7 @@ class SlicerRoot:
       l = QVBoxLayout()
       l.addWidget(v)
       l.addLayout(subtoolbar)
-      le = QLineEdit("{:03}_.jpg".format(self.indexFromItem(i).row()))
+      le = QLineEdit("{:03}_.jpg".format(self.indexFromItem(i).row() + self.offset))
       i.setData(Qt.ItemDataRole.UserRole+2, le)
       i.setData(Qt.ItemDataRole.UserRole+3, rectItem.data(Qt.ItemDataRole.UserRole+1))
       i.setData(Qt.ItemDataRole.UserRole+4, rectItem)
@@ -211,7 +260,7 @@ class SlicerRoot:
       i = self.rectToItem[rectItem]
       oldrow= self.indexFromItem(i).row()
       self.takeItem(self.indexFromItem(i).row()) #TODO is there a saner way to do this? also per docs this should leak?
-      self.updateSliceIdx(i, oldrow)
+      self.updateSliceIdx(oldrow)
 
     # refresh image section
     def sliceCoordsChanged(self, rectItem: QGraphicsRectItem):
@@ -390,10 +439,19 @@ class SlicerRoot:
     self.preview = SlicerRoot.GUISlicesPreview()
     self.previewWindow = QWidget()
     l = QVBoxLayout()
+    ll = QHBoxLayout()
     l.addWidget(self.preview)
     exportbtn = QPushButton("Export")
     exportbtn.clicked.connect(self.export)
-    l.addWidget(exportbtn)
+    l.addLayout(ll)
+    self.startnumbering = QLineEdit("0")
+    def onEdit():
+      self.preview.offset = int(self.startnumbering.text())
+      self.preview.updateSliceIdx(0)
+
+    self.startnumbering.editingFinished.connect(onEdit)
+    ll.addWidget(self.startnumbering)
+    ll.addWidget(exportbtn)
     self.previewWindow.setLayout(l)
     self.previewWindow.show()
     self.slicerFront = SlicerRoot.SlicerWindow(self.preview)
