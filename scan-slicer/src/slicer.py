@@ -7,16 +7,14 @@
 # TODO  drag slice preview to move it
 #TODO need to add slicing to icons in catalog?
 #TODO capture scroll / mouse events against slices previews
-
-
-
+import collections
 #Q keyboard event for rapid dev
 from math import sqrt
 from typing import *
 from pathlib import Path
 
 from PyQt6.QtCore import pyqtSignal, QModelIndex, Qt, QSize, QRect, QItemSelectionModel, qDebug, QObject, QEvent, \
-  QPoint, QRectF, QPointF, QSizeF, QCollator
+  QPoint, QRectF, QPointF, QSizeF, QCollator, QMimeData
 from PyQt6.QtGui import QIcon, QPixmap, QImage, QMouseEvent, QPainter, QBrush, QColor, QKeyEvent, QPen, QWheelEvent, \
   QResizeEvent, QTransform, QDragLeaveEvent, QDropEvent, QStandardItemModel
 from PyQt6.QtWidgets import QWidget, QListWidget, QListWidgetItem, QApplication, QVBoxLayout, QSizePolicy, \
@@ -39,12 +37,12 @@ def mkCollator():
   return qc
 
 class GUICatalog(QGlobalWidget):
-  class QListWidgetItemSorting(QListWidgetItem):
-    qc = mkCollator()
-
-    #def __lt__(self, other):
-    #  res = self.qc.compare(self.text(), other.text())
-    #  return res
+  #class QListWidgetItemSorting(QListWidgetItem):
+  #  qc = mkCollator()
+  #
+  #  #def __lt__(self, other):
+  #  #  res = self.qc.compare(self.text(), other.text())
+  #  #  return res
 
   class ThumbListWidget(QListWidget):
     pathChanged = pyqtSignal([str])
@@ -69,11 +67,17 @@ class GUICatalog(QGlobalWidget):
           self.updateImagesUsing(self._path)
       self.filterChanged.connect(filterChanger)
       self.currentItemChanged.connect(self.dispatchSelected)
-      self.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
       #self.model().sor
       #self.setSortingEnabled(True) #TODO does this even do anything?
       #self.sortItems(Qt.SortOrder.AscendingOrder)
       self.filter = None
+
+      self.sp = QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+      self.sp.setHorizontalStretch(1)
+      self.setSizePolicy(self.sp)
+      #TODO why doesnt this work?
+      #self.sizePolicy().setHorizontalPolicy(QSizePolicy.Policy.Minimum)
+      #self.sizePolicy().setHorizontalStretch(1)
 
     #TODO
     def dispatchSelected(self, current: QListWidgetItem, previous):
@@ -93,7 +97,7 @@ class GUICatalog(QGlobalWidget):
       for p in sorted(Path(path).iterdir(), key=lambda x: self.normalizeName(str(x))):
         #if any([str(p).lower().endswith(x) for x in ["jpg", "png"]]):
         if re.match(filt, p.name):
-          i = GUICatalog.QListWidgetItemSorting(QIcon(str(p)), str(p.name))
+          i = QListWidgetItem(QIcon(str(p)), str(p.name))
           i.setData(Qt.ItemDataRole.UserRole, str(p))
           #i.
           #i.model(.setData(QStandardItemModel().sortRole(), self.normalizeName(str(p))) #TODO hack to get sorting to work because of the __lt__ segfault issue
@@ -149,13 +153,124 @@ class Catalog(GUICatalog):
     self.application.launchSlicer(selection)
 
 class SlicerRoot:
-  dbgverb = True
+  dbgverb = False
   class ImageStore:
     def __init__(self):
       self.images = dict()
 
+  class StitchList(QListWidget):
+    def __init__(self, *args, **kwargs):
+      super().__init__(*args, **kwargs)
+      self.build()
+
+      self.setDragEnabled(True)
+      self.setAcceptDrops(True)
+      self.setDropIndicatorShown(True)
+      self.setFlow(QListWidget.Flow.LeftToRight)
+      self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+      self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+      self.setViewMode(QListWidget.ViewMode.IconMode)
+      self.setFlow(QListWidget.Flow.LeftToRight)
+
+      #self.dropqueue = collections.deque()
+      self.ownItem: QListWidgetItem = None
+      self.draggingWhat = None
+
+    def setOwnItem(self, p):
+      self.ownItem = p
+    def build(self):
+      pass
+
+    def dropEvent(self, event: QDropEvent) -> None:
+      qDebug("dropev")
+      src = event.source()
+      if isinstance(src, SlicerRoot.StitchList) and "myrow" in event.mimeData().formats():
+        parentList = src.ownItem.listWidget()
+        row = int(bytearray(event.mimeData().data("myrow")).decode("ascii"))
+        item = src.item(row)
+        widget = src.itemWidget(item) #TODO race, should be after next line?
+        item2 = src.takeItem(row)
+        assert(item2 == item)
+        item = item2
+        src.model().layoutChanged.emit()
+        self.addItem(item) #TODO is it safe to "reparent" items?
+
+        ww = QWidget()  # reparenting hack
+        l3 = QVBoxLayout()
+        ww.setLayout(l3)
+
+        childwidg = widget.property("childthing")
+        l3.addWidget(childwidg)
+        ww.setProperty("childthing", childwidg)
+
+        self.setItemWidget(item, ww)
+        self.model().layoutChanged.emit()
+        if src.model().rowCount() == 0:
+          parentList.takeItem(parentList.row(src.ownItem))
+          parentList.model().layoutChanged.emit()
+      #elif isinstance(src, SlicerRoot.GUISlicesPreview) and "myrow" in event.mimeData().formats():
+      #  row = int(bytearray(event.mimeData("myrow").data("myrow")).decode("ascii"))
+      #  item = src.takeItem(row)
+      #  self.addItem(item)
+
+      event.mimeData().removeFormat('application/x-qabstractitemmodeldatalist')
+      super().dropEvent(event)
+      self.model().layoutChanged.emit()  # TODO idk why this doesnt work by itself
+
+    def dropMimeData(self, index: int, data: QMimeData, action: Qt.DropAction) -> bool:
+      qDebug("mimedrop %s %s %s" % (index, data, action))
+      return super().dropMimeData(index, data, action)
+
+    def setState(self, state: 'QAbstractItemView.State') -> None:
+      if state != QAbstractItemView.State.DraggingState and self.draggingWhat is not None:
+        self.draggingWhat = None
+      super().setState(state)
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:
+      super().mouseMoveEvent(e) #TODO recheck order here
+      if self.state() == QAbstractItemView.State.DraggingState and self.draggingWhat is None:
+        self.draggingWhat = self.indexAt(e.position().toPoint()).row()
+
+
+    def mimeData(self, items: Iterable[QListWidgetItem]) -> QMimeData:
+      data = super().mimeData(items)
+      #data.setData("myrow", bytearray(str(self.ownItem.listWidget().row(self.ownItem)).encode("ascii")))
+      data.setData("myrow", bytearray(str(self.draggingWhat).encode("ascii")))
+      return data
+
+    #def startDrag(self, supportedActions: Qt.DropAction) -> None:
+    #  super().startDrag(supportedActions)
+
+    #def receive(self, item, ev: QDropEvent):
+    #  ev.mimeData().setData("protocolstate", "haveitem")
+    #  self.dropqueue.append(item)
+    #  self.dropEvent(ev)
+
+    #def dropEvent(self, event: QDropEvent) -> None:
+    #  qDebug("dropev")
+    #  mime = event.mimeData()
+    #  if mime.data("protocolstate") == "begindrop":
+    #    itemref = mime.data("itemref")
+    #    self.request.emit(self, event, itemref)
+    #  elif mime.data("protocolstate") == "haveitem":
+    #    item = self.dropqueue.pop()
+    #    self.model().layoutChanged.emit() #TODO idk why this doesnt work by itself
+    #    super().dropEvent(event)
+    #  else:
+    #    super().dropEvent(event)
+
+
+    #def dropMimeData(self, index: int, data: QMimeData, action: Qt.DropAction) -> bool:
+    #  qDebug("mimedrop %s %s %s" % (index, data, action))
+    #  super().dropMimeData(index, data, action)
+
+    def onDrop(self):
+      # reparent widget to list
+      # update numbering
+      pass
+
   class GUISlicesPreview(QListWidget): #TODO slicePairItem
-    # image and coords
     def __init__(self, *args, **kwargs):
       super().__init__(*args, **kwargs)
       self.build()
@@ -163,7 +278,6 @@ class SlicerRoot:
       self.setFlow(QListWidget.Flow.LeftToRight)
       self.setViewMode(QListWidget.ViewMode.IconMode)
       #self.setGridSize(QSize(128, 128))
-      #self.setViewMode(QListWidget.ViewMode.IconMode)
       self.rectToGView: Dict[QGraphicsRectItem, QGraphicsView] = dict()
       self.rectToItem: Dict[QGraphicsRectItem, QListWidgetItem] = dict()
 
@@ -171,19 +285,36 @@ class SlicerRoot:
       self.setAcceptDrops(True)
       self.setDropIndicatorShown(True)
       self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+      self.setDefaultDropAction(Qt.DropAction.MoveAction)
 
       self.offset = 0
 
+
     def dropEvent(self, event: QDropEvent) -> None:
       qDebug("dropev")
-      self.model().layoutChanged.emit() #TODO idk why this doesnt work by itself
+      src = event.source()
+      #if isinstance(src, SlicerRoot.StitchList) and "myrow" in event.mimeData().formats():
+      #  row = int(bytearray(event.mimeData().data("myrow")).decode("ascii"))
+      #  item = src.ownItem.listWidget().takeItem(row)
+      #  self.addItem(item)
+      #  event.mimeData().removeFormat('application/x-qabstractitemmodeldatalist')
+      #elif isinstance(src, SlicerRoot.GUISlicesPreview) and "myrow" in event.mimeData().formats():
+      #  row = int(bytearray(event.mimeData("myrow").data("myrow")).decode("ascii"))
+      #  item = src.takeItem(row)
+      #  self.addItem(item)
+      #  event.mimeData().removeFormat('application/x-qabstractitemmodeldatalist')
+
       super().dropEvent(event)
+      self.model().layoutChanged.emit()  # TODO idk why this doesnt work by itself
+
+    def dropMimeData(self, index: int, data: QMimeData, action: Qt.DropAction) -> bool:
+      qDebug("mimedrop %s %s %s" % (index, data, action))
+      return super().dropMimeData(index, data, action)
 
     def build(self):
       pass
 
-
-    def _setSize(self, rectItem, size, i, v):
+    def _setSize(self, rectItem, size, i: QListWidgetItem, v):
       #TODO these sizehints are wrong now becase of the subwidgets
       #i.setSizeHint(QSizeF(size.width() / 3, size.height() / 3 + 60).toSize()) #TODO the +30 is a hardcoded hack fix ... attempt
       i.setSizeHint(QSizeF(size.width() / 3, size.height() / 3).toSize())
@@ -207,7 +338,7 @@ class SlicerRoot:
     def sliceAdded(self, rectItem: QGraphicsRectItem):
       qDebug("sliceadd")
       i = QListWidgetItem()
-      self.addItem(i)
+      igrp = QListWidgetItem()
       v = QGraphicsView(rectItem.scene())
 
       def onResize(oldf):
@@ -245,7 +376,14 @@ class SlicerRoot:
       subtoolbar.addWidget(rotLButton)
       subtoolbar.addWidget(rotRButton)
 
+      ww = QWidget()  # reparenting hack
+      l3 = QVBoxLayout()
+      ww.setLayout(l3)
+
       w = QWidget()
+      l3.addWidget(w)
+      ww.setProperty("childthing", w)
+
       l = QVBoxLayout()
       l.addWidget(v)
       l.addLayout(subtoolbar)
@@ -257,7 +395,39 @@ class SlicerRoot:
       l.addWidget(le)
       w.setLayout(l)
       w.setContentsMargins(10, 10, 10, 10)
-      self.setItemWidget(i, w)
+
+      self.addItem(igrp)
+      grp = SlicerRoot.StitchList()
+      grp.setOwnItem(igrp)
+      #def handleDropRequest(target: SlicerRoot.StitchList, ev, reference): #this is basically a shitty reimplementation of pointers
+      #  item = getItem(reference)
+      #  target.receive.emit(item)
+      #grp.request.connect(handleDropRequest)
+      grp.addItem(i)
+      grp.setItemWidget(i, ww)
+      w2 = QWidget()
+      l2 = QVBoxLayout()
+      w2.setLayout(l2)
+      l2.addWidget(grp)
+      grp.setContentsMargins(10, 10, 10, 10)
+      self.setItemWidget(igrp, w2)
+      def resz():
+        h, w = 0, 0
+        for j in range(grp.model().rowCount()):
+          s = grp.sizeHintForIndex(grp.model().index(j))
+          h = max(s.height(), h)
+          w += s.width()
+        igrp.setSizeHint(QSize(w+40,h+40))
+        #sh = grp.viewport().size()
+        #sh2 = i.sizeHint()
+        #grp.setMinimumSize(QSize(max(sh.width(), sh2.width()), max(sh.height(), sh2.height()))) #TODO
+        #igrp.setSizeHint(QSize(max(sh.width(), sh2.width()), max(sh.height(), sh2.height()))) #TODO
+        #i.setSizeHint(QSize(max(sh.width(), sh2.width()), max(sh.height(), sh2.height()))) #TODO
+      #igrp.setSizeHint(QSize(grp.horizontalScrollBar().maximum()))
+      grp.model().rowsInserted.connect(resz)
+      resz()
+      #self.addItem(i)
+      #self.setItemWidget(i, w)
 
     def sliceRemoved(self, rectItem):
       qDebug("slicerem")
@@ -357,6 +527,10 @@ class SlicerRoot:
       self.scale(factor, factor)
       self.setTransformationAnchor(savedAnchor)
 
+      self.sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+      self.sp.setHorizontalStretch(4)
+      self.setSizePolicy(self.sp)
+
       #return self.wheelEvent(event)
 
   class GUISlicerWindow(QGlobalWidget):
@@ -364,6 +538,13 @@ class SlicerRoot:
       super().__init__(*args, **kwargs)
       self.preview : SlicerRoot.GUISlicesPreview = p
       self.build()
+
+      self.sp = QSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+      self.sp.setHorizontalStretch(4)
+      self.setSizePolicy(self.sp)
+      #TODO why doesnt this work?
+      #self.sizePolicy().setHorizontalPolicy(QSizePolicy.Policy.Minimum)
+      #self.sizePolicy().setHorizontalStretch(1)
 
     class DbgScene(QGraphicsScene):
       def installEventFilter(self, a0: 'QObject') -> None:
