@@ -7,6 +7,9 @@
 # TODO  drag slice preview to move it
 #TODO need to add slicing to icons in catalog?
 #TODO capture scroll / mouse events against slices previews
+
+
+
 #Q keyboard event for rapid dev
 from math import sqrt
 from typing import *
@@ -146,6 +149,7 @@ class Catalog(GUICatalog):
     self.application.launchSlicer(selection)
 
 class SlicerRoot:
+  dbgverb = True
   class ImageStore:
     def __init__(self):
       self.images = dict()
@@ -298,12 +302,14 @@ class SlicerRoot:
       self.brush = QBrush(QColor(50, 50, 200, 50))
 
     def install(self, gs: QGraphicsScene):
+      qDebug("installing eventfilter %s on %s" % (self, gs))
       gs.installEventFilter(self)
       self.scene = gs
-      qDebug("installed")
+      qDebug("installed %s on %s" % (self, gs))
 
     def eventFilter(self, obj: 'QObject', ev: 'QEvent') -> bool:
-      #qDebug("event %s" % ev.type())
+      if SlicerRoot.dbgverb:
+        qDebug("event %s" % ev.type())
       if ev.type() == QEvent.Type.GraphicsSceneMouseRelease:
         if ev.button() == Qt.MouseButton.LeftButton:
           orig: QPointF = ev.buttonDownScenePos(ev.button())
@@ -325,6 +331,7 @@ class SlicerRoot:
             r.setData(Qt.ItemDataRole.UserRole+1, image)
             self.scene.addItem(r)
             self.coord_a = None
+            qDebug("added item to scene")
             self.sliceAdded.emit(r)
             return True
       elif ev.type() == QEvent.Type.KeyPress:
@@ -358,22 +365,37 @@ class SlicerRoot:
       self.preview : SlicerRoot.GUISlicesPreview = p
       self.build()
 
+    class DbgScene(QGraphicsScene):
+      def installEventFilter(self, a0: 'QObject') -> None:
+        qDebug("installing event filter %s on %s" % (a0, self))
+        super().installEventFilter(a0)
+
     def prepareNewContext(self):
-      self.gs = QGraphicsScene()
+      self.gs = self.DbgScene()
+      qDebug("preparenew new gs %s" % self.gs)
       self.gv.setScene(self.gs)
+      qDebug("gv setscene %s" % self.gs)
 
       self.se = SlicerRoot.SliceEditor()
+      qDebug("se install %s" % self.gs)
       self.se.install(self.gs)
+      qDebug("preparenewed %s %s" % (self.gs, self.se))
 
       self.prepSignals()
 
-    def prepareContext(self, gs):
+    def prepareContext(self, gs, se):
+      qDebug("prepare")
+      qDebug("self se is %s" % self.se )
+      self.se = se
       self.gs = gs
+      qDebug("prepare gs %s" % self.gs)
       self.gv.setScene(gs)
+      qDebug("gv setscene %s" % self.gs)
 
-      self.prepSignals()
+      #self.prepSignals()
 
     def prepSignals(self):
+      qDebug("prepsignals")
       self.se.sliceAdded.connect(self.preview.sliceAdded)
       self.se.sliceRemoved.connect(self.preview.sliceRemoved)
       self.se.sliceCoordsChanged.connect(self.preview.sliceCoordsChanged)
@@ -413,6 +435,7 @@ class SlicerRoot:
     self.currentFrontImage = None
     self.stash = dict()
     self.gsstash = dict()
+    self.sestash = dict()
     pass
 
   def export(self):
@@ -464,11 +487,15 @@ class SlicerRoot:
     parentImage = self.currentFrontImage
     if parentImage:
       self.gsstash[parentImage] = self.slicerFront.gs
+      self.sestash[parentImage] = self.slicerFront.se
 
     parentImage = path
+    qDebug(repr(self.gsstash))
     if parentImage in self.gsstash:
-      self.slicerFront.prepareContext(self.gsstash[parentImage])
+      self.slicerFront.prepareContext(self.gsstash[parentImage], self.sestash[parentImage])
     else:
+      if hasattr(self.slicerFront, "gs"):
+        qDebug("onfrontchanges old gs %s" % self.slicerFront.gs)
       self.slicerFront.prepareNewContext()
       self.slicerFront.gs.addItem(QGraphicsPixmapItem(QPixmap.fromImage(QImage(path))))
       self.slicerFront.gv.fitInView(self.slicerFront.gs.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio) #TODO apparently this is currently redundant?
