@@ -7,6 +7,8 @@
 # TODO  drag slice preview to move it
 #TODO need to add slicing to icons in catalog?
 #TODO capture scroll / mouse events against slices previews
+#TODO something still screwy with rotation and resizing
+#TODO remove dead sizing code
 import collections
 #Q keyboard event for rapid dev
 from math import sqrt
@@ -20,7 +22,7 @@ from PyQt6.QtGui import QIcon, QPixmap, QImage, QMouseEvent, QPainter, QBrush, Q
 from PyQt6.QtWidgets import QWidget, QListWidget, QListWidgetItem, QApplication, QVBoxLayout, QSizePolicy, \
   QGraphicsView, QPushButton, QFileDialog, QHBoxLayout, QToolBar, QGraphicsScene, QGraphicsPixmapItem, \
   QStyledItemDelegate, QStyle, QAbstractItemView, QGraphicsSceneMouseEvent, QGraphicsItem, QGraphicsRectItem, \
-  QWidgetItem, QTextEdit, QLineEdit, QLabel
+  QWidgetItem, QTextEdit, QLineEdit, QLabel, QStyleOptionViewItem, QLayout
 import code
 import re
 
@@ -173,6 +175,8 @@ class SlicerRoot:
       self.setViewMode(QListWidget.ViewMode.IconMode)
       self.setFlow(QListWidget.Flow.LeftToRight)
 
+      self.setSizeAdjustPolicy(QListWidget.SizeAdjustPolicy.AdjustToContents)
+
       #self.dropqueue = collections.deque()
       self.ownItem: QListWidgetItem = None
       self.draggingWhat = None
@@ -182,11 +186,24 @@ class SlicerRoot:
     def build(self):
       pass
 
+    #TODO why is it using qabstractscrollareas viewportsizehint instead of qlistviews?
+    def viewportSizeHint(self) -> QSize:
+      # see qt source
+      pls = QStyleOptionViewItem();
+      self.initViewItemOption(pls);
+      w, h = 0, 0
+      for row in range(self.model().rowCount()):
+        idx = self.model().index(0)
+        sh = self.itemDelegateForIndex(idx).sizeHint(pls, idx)
+        w += sh.width() # TODO if top down left to right etc
+        h = max(h, sh.height())
+      return QSize(w, h)
+
     def dropEvent(self, event: QDropEvent) -> None:
       qDebug("dropev")
       src = event.source()
       if isinstance(src, SlicerRoot.StitchList) and "myrow" in event.mimeData().formats():
-        parentList = src.ownItem.listWidget()
+        parentList: SlicerRoot.GUISlicesPreview = src.ownItem.listWidget()
         row = int(bytearray(event.mimeData().data("myrow")).decode("ascii"))
         item = src.item(row)
         widget = src.itemWidget(item) #TODO race, should be after next line?
@@ -195,6 +212,7 @@ class SlicerRoot:
         item = item2
         src.model().layoutChanged.emit()
         self.addItem(item) #TODO is it safe to "reparent" items?
+        SlicerRoot.GUISlicesPreview.resz2(item)
 
         ww = QWidget()  # reparenting hack
         l3 = QVBoxLayout()
@@ -209,6 +227,12 @@ class SlicerRoot:
         if src.model().rowCount() == 0:
           parentList.takeItem(parentList.row(src.ownItem))
           parentList.model().layoutChanged.emit()
+
+        parentList.rectToItem[item.data(Qt.ItemDataRole.UserRole+4)] = (self.ownItem, item) #TODO i think I dont need to update ownitem
+        newgrp = parentList.row(self.ownItem)
+        newrow = item.listWidget().row(item)
+        parentList.updateSliceIdx(newgrp, newrow)
+
       #elif isinstance(src, SlicerRoot.GUISlicesPreview) and "myrow" in event.mimeData().formats():
       #  row = int(bytearray(event.mimeData("myrow").data("myrow")).decode("ascii"))
       #  item = src.takeItem(row)
@@ -279,7 +303,7 @@ class SlicerRoot:
       self.setViewMode(QListWidget.ViewMode.IconMode)
       #self.setGridSize(QSize(128, 128))
       self.rectToGView: Dict[QGraphicsRectItem, QGraphicsView] = dict()
-      self.rectToItem: Dict[QGraphicsRectItem, QListWidgetItem] = dict()
+      self.rectToItem: Dict[QGraphicsRectItem, Tuple[QListWidgetItem, QListWidgetItem]] = dict()
 
       self.setDragEnabled(True)
       self.setAcceptDrops(True)
@@ -314,13 +338,35 @@ class SlicerRoot:
     def build(self):
       pass
 
+    @staticmethod
+    def resz2( item):
+      h, w = 0, 0
+      widg = item.listWidget()
+      for j in range(widg.model().rowCount()):
+        s = widg.sizeHintForIndex(widg.model().index(j))
+        h = max(s.height(), h)
+        w += s.width()
+      widg.ownItem.setSizeHint(QSize(w+40,h+40))
+      widg.ownItem.listWidget().model().layoutChanged.emit()
+
+    @staticmethod
+    def reszGroup(gitem, listw):
+      h, w = 0, 0
+      for j in range(listw.model().rowCount()):
+        s = listw.sizeHintForIndex(listw.model().index(j))
+        h = max(s.height(), h)
+        w += s.width()
+      gitem.setSizeHint(QSize(w+40,h+40))
+      gitem.listWidget().model().layoutChanged.emit()
+
     def _setSize(self, rectItem, size, i: QListWidgetItem, v):
       #TODO these sizehints are wrong now becase of the subwidgets
       #i.setSizeHint(QSizeF(size.width() / 3, size.height() / 3 + 60).toSize()) #TODO the +30 is a hardcoded hack fix ... attempt
       i.setSizeHint(QSizeF(size.width() / 3, size.height() / 3).toSize())
+      #qDebug("sizehint %s" % i.sizeHint())
       # i.setSizeHint(size)
+      i.listWidget().model().layoutChanged.emit()
       v.fitInView(rectItem.sceneBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
-      self.model().layoutChanged.emit()
     def setItemSize(self, rectItem, i, v):
       size = rectItem.sceneBoundingRect().size().toSize()
       self._setSize(rectItem, size, i, v)
@@ -330,16 +376,68 @@ class SlicerRoot:
       size = newRect.size().toSize()
       self._setSize(rectItem, size, i, v)
 
-    def updateSliceIdx(self, oldrow):
-      for row in range(oldrow, self.model().rowCount()):
-        le: QLineEdit = self.item(row).data(Qt.ItemDataRole.UserRole+2)
-        le.setText("{:03}_{}".format(row + self.offset, le.text().split("_")[1]))
+    def updateSliceIdx(self, oldgrp, oldrow):
+      for grp in range(oldgrp, self.model().rowCount()):
+        grpitem = self.item(grp)
+        grpwid: QListWidget = self.itemWidget(grpitem).property("childthing")
+        for row in range(oldrow, grpwid.model().rowCount()):
+          le: QLineEdit = grpwid.item(row).data(Qt.ItemDataRole.UserRole + 2)
+          if row > 0:
+            le.setText("splice_{}".format(le.text().split("_")[1]))
+          else:
+            le.setText("{:03}_{}".format(grp + self.offset, le.text().split("_")[1]))
 
     def sliceAdded(self, rectItem: QGraphicsRectItem):
+      class QSizeListWidItem(QListWidgetItem):
+        def data(self, role: int) -> Any:
+          if role == Qt.ItemDataRole.SizeHintRole:
+            if self.listWidget() is not None and self.listWidget().itemWidget(self) is not None: #TODO shouldnt be needed
+              return self.listWidget().itemWidget(self).sizeHint()
+          return super().data(role)
+        def setSizeHint(self, size: QSize) -> None:
+          #if self.listWidget() is not None and self.listWidget().itemWidget(self) is not None:
+          #  super().setSizeHint(self.listWidget().itemWidget(self).sizeHint())
+          pass
+
+        #TODO why isnt this called? # its because the role is usd instead
+        def sizeHint(self) -> QSize:
+          if self.listWidget() is not None and self.listWidget().itemWidget(self) is not None:
+            sz =  self.listWidget().itemWidget(self).sizeHint()
+            qDebug("sizehint %s" % sz)
+            return sz
+          else:
+            return QSize()
+
       qDebug("sliceadd")
-      i = QListWidgetItem()
-      igrp = QListWidgetItem()
-      v = QGraphicsView(rectItem.scene())
+      i = QSizeListWidItem()
+      i.setData(Qt.ItemDataRole.UserRole + 1, 0) # rotation
+      igrp = QSizeListWidItem()
+      class QGraphicsViewSized(QGraphicsView):
+        def __init__(self, rect, listitem, *args, **kwargs):
+          self.myrect = rect
+          self.listitem: QSizeListWidItem = listitem
+          super().__init__(*args, **kwargs)
+          self.oldAngle = None
+          self.sizething = None
+
+        def resize(self, a0: QSize) -> None:
+          qDebug("resize %s" % a0)
+          super().resize(a0)
+        def sizeHint(self) -> QSize:
+          #sh = super().sizeHint()
+          angle = self.listitem.data(Qt.ItemDataRole.UserRole + 1)
+          if self.oldAngle != angle:
+            newRect = QTransform().rotate(-angle).mapRect(rectItem.sceneBoundingRect())
+            sh = newRect.size().toSize()
+            self.sizething = QSize(sh.width()//3, sh.height()//3)
+            #self.listitem.setData(Qt.ItemDataRole.SizeHintRole, self.sizething)
+            #self.listitem.listWidget().itemDelegate().sizeHintChanged.emit(self.listitem.listWidget().indexFromItem(i))
+          qDebug("sizehint2 %s" % self.sizething)
+          return self.sizething
+
+      v = QGraphicsViewSized(rectItem, i, rectItem.scene())
+      #v.sizePolicy().setVerticalPolicy(QSizePolicy.Policy.) #TODO need to fix sizehint qlistwidgetitem sizing to use the preferred graphics size and then fit the form...
+
 
       def onResize(oldf):
         def f(ev: QResizeEvent): # todo
@@ -350,9 +448,7 @@ class SlicerRoot:
       v.resizeEvent = onResize(v.resizeEvent)
       v.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
       v.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-      self.setItemSize(rectItem, i, v)
       self.rectToGView[rectItem] = v
-      self.rectToItem[rectItem] = i
 
       def rot(a):
         v.rotate(a)
@@ -363,7 +459,15 @@ class SlicerRoot:
         else:
           i.setData(Qt.ItemDataRole.UserRole + 1, a)
 
-        self.setItemSizeRot(rectItem, i, v, i.data(Qt.ItemDataRole.UserRole+1))
+        #i.setData(Qt.ItemDataRole.SizeHintRole, )
+        #i.listWidget().itemDelegate().sizeHintChanged.emit(i.listWidget().indexFromItem(i))
+        #i.listWidget().itemDelegateForIndex(i.listWidget().indexFromItem(i)).sizeHintChanged.emit(i.listWidget().indexFromItem(i))
+        #v.adjustSize() #todo this only partly works
+        #v.parent().adjustSize()
+        #v.parent().layout().invalidate()
+        #v.parent().layout().activate()
+        self.setItemSizeRot(rectItem, i, v, i.data(Qt.ItemDataRole.UserRole+1)) #TODO i think I broke this with the new grouping thing
+        SlicerRoot.GUISlicesPreview.resz2(i)
 
       rotL = lambda: rot(-90)
       rotR = lambda: rot(90)
@@ -387,16 +491,19 @@ class SlicerRoot:
       l = QVBoxLayout()
       l.addWidget(v)
       l.addLayout(subtoolbar)
-      le = QLineEdit("{:03}_.jpg".format(self.indexFromItem(i).row() + self.offset))
-      i.setData(Qt.ItemDataRole.UserRole+2, le)
       i.setData(Qt.ItemDataRole.UserRole+3, rectItem.data(Qt.ItemDataRole.UserRole+1))
       i.setData(Qt.ItemDataRole.UserRole+4, rectItem)
 
-      l.addWidget(le)
       w.setLayout(l)
       w.setContentsMargins(10, 10, 10, 10)
 
       self.addItem(igrp)
+
+      # needs to be after igrp is added to the list
+      le = QLineEdit("{:03}_.jpg".format(self.indexFromItem(igrp).row() + self.offset))
+      i.setData(Qt.ItemDataRole.UserRole + 2, le)
+      l.addWidget(le)
+
       grp = SlicerRoot.StitchList()
       grp.setOwnItem(igrp)
       #def handleDropRequest(target: SlicerRoot.StitchList, ev, reference): #this is basically a shitty reimplementation of pointers
@@ -404,8 +511,11 @@ class SlicerRoot:
       #  target.receive.emit(item)
       #grp.request.connect(handleDropRequest)
       grp.addItem(i)
+      self.setItemSize(rectItem, i, v)
       grp.setItemWidget(i, ww)
       w2 = QWidget()
+
+      w2.setProperty("childthing", grp)
       l2 = QVBoxLayout()
       w2.setLayout(l2)
       l2.addWidget(grp)
@@ -429,18 +539,28 @@ class SlicerRoot:
       #self.addItem(i)
       #self.setItemWidget(i, w)
 
+      self.rectToItem[rectItem] = (igrp, i) # maybe this should have been a tree at this point
+
     def sliceRemoved(self, rectItem):
       qDebug("slicerem")
-      i = self.rectToItem[rectItem]
-      oldrow= self.indexFromItem(i).row()
-      self.takeItem(self.indexFromItem(i).row()) #TODO is there a saner way to do this? also per docs this should leak?
-      self.updateSliceIdx(oldrow)
+      igrp, i = self.rectToItem[rectItem]
+      innerw = i.listWidget()
+      outerw = igrp.listWidget()
+      oldgrp = igrp.listWidget().indexFromItem(igrp).row()
+      oldrow = innerw.indexFromItem(i).row()
+      innerw.takeItem(oldrow) #TODO is there a saner way to do this? also per docs this should leak?
+      if innerw.model().rowCount() == 0:
+        igrp.listWidget().takeItem(oldgrp)
+      else:
+        if outerw.model().rowCount() != 0:
+          SlicerRoot.GUISlicesPreview.reszGroup(igrp, innerw)
+        self.updateSliceIdx(oldgrp, oldrow)
 
     # refresh image section
     def sliceCoordsChanged(self, rectItem: QGraphicsRectItem):
       #qDebug("geomchange")
       v = self.rectToGView[rectItem]
-      i = self.rectToItem[rectItem]
+      _, i = self.rectToItem[rectItem]
       userdata = i.data(Qt.ItemDataRole.UserRole+1)
       if userdata:
         self.setItemSizeRot(rectItem, i, v, userdata)
@@ -489,7 +609,7 @@ class SlicerRoot:
           return super().eventFilter(obj, ev)
         elif ev.button() == Qt.MouseButton.RightButton:
           if self.coord_a:
-            r = SlicerRoot.SliceRectItem(self, QRectF(self.coord_a, ev.buttonDownScenePos(ev.button())))
+            r = SlicerRoot.SliceRectItem(self, QRectF(self.coord_a, ev.buttonDownScenePos(ev.button())).normalized())
             r.setPen(self.pen)
             r.setBrush(self.brush)
             r.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -622,22 +742,65 @@ class SlicerRoot:
   def export(self):
     savedir = QFileDialog.getExistingDirectory()
     savedir = Path(savedir)
-    for idx in range(self.preview.model().rowCount()):
-      item = self.preview.itemFromIndex(self.preview.model().index(idx))
-      fname = item.data(Qt.ItemDataRole.UserRole+2).text()
-      graphicspixmapitem: QGraphicsPixmapItem = item.data(Qt.ItemDataRole.UserRole+3)
-      recti = item.data(Qt.ItemDataRole.UserRole+4)
-      rotation = item.data(Qt.ItemDataRole.UserRole+1)
-      rotation = rotation if rotation else 0
-      pm = QPixmap(graphicspixmapitem.pixmap().copy(recti.sceneBoundingRect().toRect()).transformed(QTransform().rotate(rotation)))
-      #l = QLabel()
-      #l.setPixmap(pm)
-      #self.w = QWidget()
-      #ll = QVBoxLayout()
-      #self.w.setLayout(ll)
-      #ll.addWidget(l)
-      #self.w.show()
+
+    for grp in range(self.preview.model().rowCount()):
+      grpitem = self.preview.item(grp)
+      grpwid: QListWidget = self.preview.itemWidget(grpitem).property("childthing")
+      le: QLineEdit = grpwid.item(0).data(Qt.ItemDataRole.UserRole + 2)
+      fname = le.text()
+
+      #TODO not sure if its possibel for qpainter to autosize this?
+      x = 0
+      spacer = 10
+      wsum, hmax = 0, 0
+      for row in range(grpwid.model().rowCount()):
+        item = grpwid.item(row)
+        recti = item.data(Qt.ItemDataRole.UserRole+4)
+        rect: QRect = recti.sceneBoundingRect().toRect()
+        rotation = item.data(Qt.ItemDataRole.UserRole+1)
+        rotated = QTransform().rotate(rotation).mapRect(rect)
+
+        hmax = max(hmax, rotated.height())
+        wsum += rotated.width() + spacer
+
+      pm = QPixmap(wsum, hmax)
+      pt = QPainter()
+
+      pt.begin(pm) #TODO not using begin and end breaks for somer reason
+      items = grpwid.model().rowCount()
+      for row in range(items):
+        item = grpwid.item(row)
+        recti = item.data(Qt.ItemDataRole.UserRole+4)
+
+        gpx: QPixmap = item.data(Qt.ItemDataRole.UserRole + 3).pixmap()
+        rect: QRect = recti.sceneBoundingRect().toRect()
+        rotation = item.data(Qt.ItemDataRole.UserRole+1)
+        rotated = QTransform().rotate(rotation).mapRect(rect)
+
+        rotatedimg = gpx.copy(rect).transformed(QTransform().rotate(rotation))
+        pt.drawPixmap(QRect(x, 0, rotated.width(), rotated.height()), rotatedimg, rotatedimg.rect())
+        x += rotated.width() + (spacer if row < items - 1 else 0)
+
+      pt.end()
       pm.save(str(savedir / fname))
+
+    # for idx in range(self.preview.model().rowCount()):
+    #   item = self.preview.itemFromIndex(self.preview.model().index(idx))
+    #   fname = item.data(Qt.ItemDataRole.UserRole+2).text()
+    #
+    #   graphicspixmapitem: QGraphicsPixmapItem = item.data(Qt.ItemDataRole.UserRole+3)
+    #   recti = item.data(Qt.ItemDataRole.UserRole+4)
+    #   rotation = item.data(Qt.ItemDataRole.UserRole+1)
+    #   rotation = rotation if rotation else 0
+    #   pm = QPixmap(graphicspixmapitem.pixmap().copy(recti.sceneBoundingRect().toRect()).transformed(QTransform().rotate(rotation)))
+    #   #l = QLabel()
+    #   #l.setPixmap(pm)
+    #   #self.w = QWidget()
+    #   #ll = QVBoxLayout()
+    #   #self.w.setLayout(ll)
+    #   #ll.addWidget(l)
+    #   #self.w.show()
+    #   pm.save(str(savedir / fname))
 
   def build(self):
     self.preview = SlicerRoot.GUISlicesPreview()
@@ -651,7 +814,7 @@ class SlicerRoot:
     self.startnumbering = QLineEdit("0")
     def onEdit():
       self.preview.offset = int(self.startnumbering.text())
-      self.preview.updateSliceIdx(0)
+      self.preview.updateSliceIdx(0, 0)
 
     self.startnumbering.editingFinished.connect(onEdit)
     ll.addWidget(self.startnumbering)
