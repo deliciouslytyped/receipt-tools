@@ -1,4 +1,5 @@
 #TODO autosave project
+#TODO really needs reordering, project saving, also there is a hard to repro crash somewhere
 #TODO workable reordering, / alt: numbering range spec
 #TODO front/back
 #TODO stitching
@@ -202,14 +203,17 @@ class SlicerRoot:
     def dropEvent(self, event: QDropEvent) -> None:
       qDebug("dropev")
       src = event.source()
-      if isinstance(src, SlicerRoot.StitchList) and "myrow" in event.mimeData().formats():
+      if isinstance(src, SlicerRoot.StitchList) and "myrow" in event.mimeData().formats() \
+              and src.item(int(bytearray(event.mimeData().data("myrow")).decode("ascii"))) != None: #TODO instead of spending time debugging this more im just going to cancel the symptoms
         parentList: SlicerRoot.GUISlicesPreview = src.ownItem.listWidget()
         row = int(bytearray(event.mimeData().data("myrow")).decode("ascii"))
-        item = src.item(row)
+        qDebug("crashrow %s" % row)
+        item = src.item(row) #TODO there are cases where row is -1 and there are cases where row is a number but the entry isnt valid #TODO so this is probably two different bugs?
+        qDebug("crashitem %s" % item)
         widget = src.itemWidget(item) #TODO race, should be after next line?
         item2 = src.takeItem(row)
         assert(item2 == item)
-        item = item2
+        item = item2 #TODO there is a bug where these are both null, is the myrow set wrong? or race condition with removal?
         src.model().layoutChanged.emit()
         self.addItem(item) #TODO is it safe to "reparent" items?
         SlicerRoot.GUISlicesPreview.resz2(item)
@@ -253,13 +257,20 @@ class SlicerRoot:
 
     def mouseMoveEvent(self, e: QMouseEvent) -> None:
       super().mouseMoveEvent(e) #TODO recheck order here
-      if self.state() == QAbstractItemView.State.DraggingState and self.draggingWhat is None:
+      if self.state() == QAbstractItemView.State.DraggingState:
+        qDebug("position %s" % e.position())
+        if self.indexAt(e.position().toPoint()).row() != self.draggingWhat:
+          qDebug("WTF WRONG ROW") #TODO should really debug this but instead im just gonna actively set it #TODO i.e. there is a crash mediated here
+        #if self.draggingWhat is None: #TODO bug Is there any way for the source row to change without going through the setstate reset??
+        #  self.draggingWhat = self.indexAt(e.position().toPoint()).row()
+        #  print("", end="")
         self.draggingWhat = self.indexAt(e.position().toPoint()).row()
 
 
     def mimeData(self, items: Iterable[QListWidgetItem]) -> QMimeData:
       data = super().mimeData(items)
       #data.setData("myrow", bytearray(str(self.ownItem.listWidget().row(self.ownItem)).encode("ascii")))
+      qDebug("crashsearch is draggingwhat invalid %s %s" % (self.draggingWhat, self.item(self.draggingWhat)))
       data.setData("myrow", bytearray(str(self.draggingWhat).encode("ascii")))
       return data
 
@@ -609,7 +620,7 @@ class SlicerRoot:
           return super().eventFilter(obj, ev)
         elif ev.button() == Qt.MouseButton.RightButton:
           if self.coord_a:
-            r = SlicerRoot.SliceRectItem(self, QRectF(self.coord_a, ev.buttonDownScenePos(ev.button())).normalized())
+            r = SlicerRoot.SliceRectItem(self, QRectF(QPointF(self.coord_a.x()+i*5, self.coord_a.y()+i*5), ev.buttonDownScenePos(ev.button())).normalized())
             r.setPen(self.pen)
             r.setBrush(self.brush)
             r.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
